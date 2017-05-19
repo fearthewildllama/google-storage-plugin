@@ -22,6 +22,7 @@ import java.io.Serializable;
 import java.math.BigInteger;
 import java.net.URLConnection;
 import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedList;
@@ -101,7 +102,9 @@ import hudson.remoting.Callable;
 public abstract class AbstractUpload
     implements Describable<AbstractUpload>, ExtensionPoint, Serializable {
   // Only attempt to refresh the remote credentials once per 401 received.
-  protected static final int MAX_REMOTE_CREDENTIAL_EXPIRED_RETRIES = 1;
+  protected static final int MAX_REMOTE_CREDENTIAL_EXPIRED_RETRIES = 5;
+  private static final int[] RETRY_TIMES = new int[] {1, 2, 3, 5, 8};
+  private static final SecureRandom SECURE_RANDOM = new SecureRandom();
   private static final Logger logger =
       Logger.getLogger(AbstractUpload.class.getName());
   private static final ImmutableMap<String, String> CONTENT_TYPES =
@@ -462,6 +465,7 @@ public abstract class AbstractUpload
         if (credRefreshesRemaining > 0
             && e.getStatusCode() == STATUS_CODE_UNAUTHORIZED) {
           logger.fine("Remote credentials expired, retrying.");
+          sleepForRetry(credRefreshesRemaining);
           credRefreshesRemaining--;
         } else {
           throw new UploadException(
@@ -477,10 +481,30 @@ public abstract class AbstractUpload
         throw new UploadException(
             Messages.AbstractUpload_ExceptionFileUpload(), e);
       }  catch (GeneralSecurityException e) {
-        throw new UploadException(
-            Messages.AbstractUpload_RemoteCredentialError(), e);
+        if (credRefreshesRemaining > 0) {
+          logger.warning("Remote credentials expired, retrying after sleep.");
+          sleepForRetry(credRefreshesRemaining);
+          credRefreshesRemaining--;
+        } else {
+          throw new UploadException(
+                  Messages.AbstractUpload_RemoteCredentialError(), e);
+        }
       }
     } while (!paths.isEmpty());
+  }
+
+  private static void sleepForRetry(int retriesRemaining) {
+    int currentAttempt = MAX_REMOTE_CREDENTIAL_EXPIRED_RETRIES - retriesRemaining;
+    long sleepTimeInMS =
+            RETRY_TIMES[(currentAttempt >= MAX_REMOTE_CREDENTIAL_EXPIRED_RETRIES) ? MAX_REMOTE_CREDENTIAL_EXPIRED_RETRIES - 1 : currentAttempt] + SECURE_RANDOM.nextInt(1000);
+
+    logger.warning("Sleeping for " + sleepTimeInMS + " ms.");
+
+    try {
+      Thread.sleep(sleepTimeInMS);
+    } catch (InterruptedException e) {
+      logger.warning("Interrupted while sleeping (will just continue): " + e.getMessage());
+    }
   }
 
   /**
